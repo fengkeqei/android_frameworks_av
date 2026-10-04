@@ -1569,7 +1569,13 @@ int AudioPolicyService::UidPolicy::getUidState(uid_t uid) {
             return ActivityManager::PROCESS_STATE_TOP;
         }
         auto cacheIter = mCachedUids.find(uid);
-        if (cacheIter != mCachedUids.end()) {
+        if (cacheIter != mCachedUids.end()
+                && cacheIter->second.second != ActivityManager::PROCESS_STATE_UNKNOWN) {
+            // Round 71: only trust the cached state when it carries a real
+            // process state. Persistent uids (e.g. radio, hosting the IMS media
+            // capture) never emit onUidStateChanged, so a cache seeded with
+            // UNKNOWN by onUidActive would otherwise pin the uid to IDLE and
+            // permanently silence the capture.
             if (cacheIter->second.first) {
                 return cacheIter->second.second;
             } else {
