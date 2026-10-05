@@ -265,6 +265,17 @@ private:
     std::map<audio_session_t, std::shared_ptr<EffectVector>> mOutputSessions
             GUARDED_BY(mMutex);
 
+    // Round-72 72-2m: the effects HAL service can register after audioserver has
+    // started; EffectsFactoryHalInterface::create() then returns null in the ctor
+    // and pre-/post-processing chains stay empty for the whole boot (no AEC/NS on
+    // voice_communication capture). Keep the interface and a loaded flag so the
+    // configuration load can be retried lazily on first use. Guarded by mMutex.
+    sp<EffectsFactoryHalInterface> mEffectsFactoryHal GUARDED_BY(mMutex);
+    bool mAudioEffectConfigLoaded GUARDED_BY(mMutex) = false;
+    // Caller must hold mMutex; temporarily takes mDeviceEffectsMutex with the same
+    // mMutex -> mDeviceEffectsMutex nesting the ctor uses.
+    status_t ensureAudioEffectConfig_l() REQUIRES(mMutex);
+
     /**
      * @brief mDeviceEffects map of device effects indexed by the device address
      */

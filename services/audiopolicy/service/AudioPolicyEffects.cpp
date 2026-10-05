@@ -46,19 +46,61 @@ AudioPolicyEffects::AudioPolicyEffects(const sp<EffectsFactoryHalInterface>& eff
     // acquiring the associated mutex capability as standard practice is to assume
     // single threaded construction and destruction.
 
+    // Round-72 72-2m: keep the interface around for a lazy retry, see
+    // ensureAudioEffectConfig_l().
+    mEffectsFactoryHal = effectsFactoryHal;
+
     // load xml config with effectsFactoryHal
     status_t loadResult = loadAudioEffectConfig_ll(effectsFactoryHal);
     if (loadResult < 0) {
         ALOGW("Failed to query effect configuration, fallback to load .conf");
         // load automatic audio effect modules
         if (access(AUDIO_EFFECT_VENDOR_CONFIG_FILE, R_OK) == 0) {
-            loadAudioEffectConfigLegacy_l(AUDIO_EFFECT_VENDOR_CONFIG_FILE);
+            if (loadAudioEffectConfigLegacy_l(AUDIO_EFFECT_VENDOR_CONFIG_FILE) == NO_ERROR) {
+                mAudioEffectConfigLoaded = true;
+            }
         } else if (access(AUDIO_EFFECT_DEFAULT_CONFIG_FILE, R_OK) == 0) {
-            loadAudioEffectConfigLegacy_l(AUDIO_EFFECT_DEFAULT_CONFIG_FILE);
+            if (loadAudioEffectConfigLegacy_l(AUDIO_EFFECT_DEFAULT_CONFIG_FILE) == NO_ERROR) {
+                mAudioEffectConfigLoaded = true;
+            }
         }
-    } else if (loadResult > 0) {
-        ALOGE("Effect config is partially invalid, skipped %d elements", loadResult);
+    } else {
+        mAudioEffectConfigLoaded = true;
+        if (loadResult > 0) {
+            ALOGE("Effect config is partially invalid, skipped %d elements", loadResult);
+        }
     }
+}
+
+// Round-72 72-2m: lazily (re)create the effects factory interface and (re)load the
+// audio effect configuration. Covers the boot ordering race where the effects HAL
+// service registers after audioserver: the one-shot ctor load fails with a null
+// interface and, without this retry, pre-/post-processing chains never attach and
+// voice_communication capture runs without AEC/NS for the whole boot.
+status_t AudioPolicyEffects::ensureAudioEffectConfig_l() {
+    if (mAudioEffectConfigLoaded) return NO_ERROR;
+    if (mEffectsFactoryHal == nullptr) {
+        mEffectsFactoryHal = EffectsFactoryHalInterface::create();
+        if (mEffectsFactoryHal == nullptr) return NO_INIT;
+    }
+    status_t loadResult;
+    {
+        std::lock_guard _l(mDeviceEffectsMutex);
+        loadResult = loadAudioEffectConfig_ll(mEffectsFactoryHal);
+    }
+    if (loadResult < 0) {
+        ALOGW("Failed to query effect configuration on retry, fallback to load .conf");
+        if (access(AUDIO_EFFECT_VENDOR_CONFIG_FILE, R_OK) == 0) {
+            loadResult = loadAudioEffectConfigLegacy_l(AUDIO_EFFECT_VENDOR_CONFIG_FILE);
+        } else if (access(AUDIO_EFFECT_DEFAULT_CONFIG_FILE, R_OK) == 0) {
+            loadResult = loadAudioEffectConfigLegacy_l(AUDIO_EFFECT_DEFAULT_CONFIG_FILE);
+        }
+    }
+    if (loadResult >= 0) {
+        mAudioEffectConfigLoaded = true;
+        return NO_ERROR;
+    }
+    return loadResult;
 }
 
 status_t AudioPolicyEffects::addInputEffects(audio_io_handle_t input,
@@ -72,6 +114,8 @@ status_t AudioPolicyEffects::addInputEffects(audio_io_handle_t input,
                                     AUDIO_SOURCE_VOICE_RECOGNITION : inputSource;
 
     audio_utils::lock_guard _l(mMutex);
+    // Round-72 72-2m: cover the audioserver/effects-HAL boot ordering race.
+    ensureAudioEffectConfig_l();
     auto sourceIt = mInputSources.find(aliasSource);
     if (sourceIt == mInputSources.end()) {
         ALOGV("addInputEffects(): no processing needs to be attached to this source");
@@ -194,6 +238,8 @@ status_t AudioPolicyEffects::addOutputSessionEffects(audio_io_handle_t output,
     status_t status = NO_ERROR;
 
     audio_utils::lock_guard _l(mMutex);
+    // Round-72 72-2m: cover the audioserver/effects-HAL boot ordering race.
+    ensureAudioEffectConfig_l();
     // create audio processors according to stream
     // FIXME: should we have specific post processing settings for internal streams?
     // default to media for now.
